@@ -1,0 +1,800 @@
+---
+title: "Predicting Churn with Machine Learning: Rmd"
+output: html_notebook
+---
+
+## By Margaret Catherman
+## April 2022
+
+## A. Data Preparation & Exploration
+```{r}
+rm(list = ls())
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library("readxl")
+library(caret)
+library(rpart)  #Classification tree 
+library(e1071) #Naive Bayes,   
+library(MASS)   
+library(gbm) #Boosting
+library(randomForest)
+library(ggplot2)
+library(reshape2)
+
+```
+
+
+This is the Ecommerce Data set, available from
+ https://www.kaggle.com/datasets/ankitverma2010/ecommerce-customer-churn-analysis-and-prediction
+```{r}
+setwd("/Users/margaretcatherman/Downloads")
+discription <- read_excel("E Commerce Dataset.xlsx", sheet = "Data Dict")
+df <- read_excel("E Commerce Dataset.xlsx", sheet = "E Comm")
+
+discription
+head(df)
+tail(df)
+```
+
+Let's look a the data:
+```{r}
+str(df)
+```
+
+
+
+```{r}
+#Hmisc::describe(df)
+```
+
+
+Let's check for missing data;
+```{r}
+dim(df)
+sum(is.na(df))
+```
+While this is substantial, we will omit missing values
+For now, we will remove all rows w NA: 
+```{r}
+df.1 <- na.omit(df)
+head(df.1)  #df omiting NA
+```
+
+The Ecommerce Data set with missing values removed:
+```{r}
+sum(is.na(df.1))
+dim(df.1)
+```
+
+
+
+Create dummy variables for all character/categorical variables, following several steps:
+
+a. Pull all character/categorical variables together
+```{r}
+df.char <- df.1 %>% 
+  select_if(is.character) 
+
+head(df.char)
+```
+
+Let's take a look:
+```{r}
+str(df.char)
+```
+
+b. df.num <- Put all initially numeric variables together 
+```{r}
+df.num <- df.1 %>%
+  select_if(is.numeric) 
+head(df.num,3)
+```
+
+
+```{r}
+pairs(df.num)
+```
+
+c. # Automatically dummify the character data
+
+Data Mining for business Analytics: Concepts, Techniques, and applications in R, Shmueli, et al;Catagroical Catagorical predictors for Classification trees should be converted to dummy variables.  As w KNN, a factor w m catagories, m>2, should be factored into m dummy variables, NOT m-1.
+(p 209) 
+```{r}
+
+dmy <- dummyVars(" ~ .", data = df.char)
+trsf <- data.frame(predict(dmy, newdata = df.char))
+head(trsf)
+```
+
+
+
+Put df.num (that was initially numeric) back together with trsf (df.1 w all character as dummy var, thus numeric)
+
+```{r}
+data = NULL
+data <- rbind(data, cbind(df.num, trsf))
+head(data)
+```
+
+
+```{r}
+setwd("/Users/margaretcatherman/Downloads")
+#write.csv(data, "Churn_prepped.csv", row.names = FALSE) 
+```
+
+
+Standardize data: Not needed for RF, but is needed for some other methods that will be used.
+
+Scale Data min-max scaling: The data is scaled to a fixed range: 0 to 1. This results in smaller standard deviations, which helps supress effect of outliers.
+```{r}
+preproc <- preProcess(data[,c(2:36)], method = c("range"))
+norm.df <- predict(preproc, data[,c(2:36)])
+boxplot(norm.df)
+```
+
+
+Divide into train/test (data has been normalized, missing values removed; predictors converted to characters.)
+```{r}
+set.seed(7406)
+
+n = dim(norm.df)[1]  #total # observations
+n1 = round(n/3)   #no. observations randomly selected for testing
+
+flag = sort(sample(1:n, n1))
+train = norm.df[-flag,] 
+test = norm.df[flag,]
+
+dim(train)
+dim(test)
+```
+
+
+```{r}
+head(train,3)
+head(test,3)
+```
+
+Extra the true response value for training and testing data
+```{r}
+y1 <- train$Churn
+y2 <- test$Churn
+```
+
+
+train
+Feature Selection for Classification: Recursive feature elimination, Boruta, Random Forests
+
+## B. Methods
+
+## 1. RandomForests Classification
+```{r}
+#library(randomForest)
+set.seed(123)
+
+rf <- randomForest(as.factor(Churn) ~., data = train, mtry = sqrt(34), importance = TRUE)
+
+```
+
+
+
+
+RF: Training error prediction & confusion matrix
+```{r}
+rf.pred.train = predict(rf, train, type='class')
+table(rf.pred.train, y1)
+```
+
+
+RF: Training error rate w ibe round of RF
+```{r}
+y1hat.rf.train = predict(rf, train, type='class')
+mean(y1hat.rf.train != y1)
+```
+
+RF: Test error prediction & confusion matrix
+```{r}
+rf.pred.test = predict(rf, test, type='class')
+table(rf.pred.test, y2)
+```
+
+RF: Test error rate
+```{r}
+#.038
+y2hat.rf.test = predict(rf, test, type='class')
+a <- mean(y2hat.rf.test != y2)
+a
+```
+
+
+
+
+Use tuneRF to improve parameteres:
+```{r}
+# names of features
+features <- setdiff(names(train), as.factor("Churn"))
+
+set.seed(123)
+
+m2 <- tuneRF(
+  x          = train[features],
+  y          = as.factor(train$Churn),
+  #y          = train$Churn,
+  ntreeTry   = 500,
+  mtryStart  = 4,
+  stepFactor = 1.5,
+  improve    = 0.01,
+  trace      = FALSE,
+  type       = 'class'            # to not show real-time progress 
+)
+```
+We see that the optimal number for mytry is 19
+
+Let's apply the optimal value of 19 to mtry & change some other paramters
+and see if error rate is improved?
+```{r}
+set.seed(123)
+#no of rows train data = 2516; no of rows test data = 1258
+rfb <- randomForest(as.factor(Churn) ~., data=train, ntree= 500, 
+                   mtry = 19, nodesize = 1,  importance = TRUE)
+    
+```
+
+
+RF: Training error prediction & confusion matrix
+```{r}
+rfb.pred.train = predict(rfb, train, type='class')
+table(rfb.pred.train, y1)
+```
+
+
+RF: Test error prediction & confusion matrix
+```{r}
+rfb.pred.test = predict(rfb, test, type='class')
+table(rfb.pred.test, y2)
+```
+
+RF: Test error rate
+```{r}
+#.038
+y2hat.rfb.test = predict(rfb, test, type='class')
+b <- mean(y2hat.rfb.test != y2)
+b
+```
+
+`
+
+
+#Resume Check Important features here for RF
+```{r}
+
+## Check Important variables
+#importance(rfb)
+## There are two types of importance measure 
+##  (1=mean decrease in accuracy, 
+##   2= mean decrease in node impurity)
+importance(rfb, type=2)
+```
+
+
+```{r}
+varImpPlot(rfb)
+```
+
+
+
+```{r}
+sqrt(34)
+34/3
+```
+
+
+
+## 2. Boosting 
+http://uc-r.github.io/gbm_regression
+
+```{r}
+## You need to first install this R package before using it
+#library(gbm) 
+
+### 
+# reproducibility
+set.seed(123)
+
+gbm1 <- gbm(Churn ~ .,
+                 data = train,
+                 distribution = 'bernoulli', #for classifcation
+                   n.trees = 5000,            #The parameter M
+                   shrinkage = 0.01,          #The value lambda, default = .01
+                   interaction.depth = 3,      #interactions between x's
+                   cv.folds = 10) 
+## Model Inspection 
+## Find the estimated optimal number of iterations
+perf_gbm1 = gbm.perf(gbm1, method="cv") 
+perf_gbm1
+```
+
+
+ 
+```{r}
+## summary model
+## Which variances are important
+summary(gbm1)
+```
+ 
+ Top three variables by importance: Tenure, CashbackAmount, NumberofAddress, for Boosting, as well as with Gini from RF. Tenure is significantly higher in both.  Going forward, could use these three, or Tenure by itself.
+
+Training error
+```{r}
+## Make Prediction
+## use "predict" to find the training or testing error
+
+## Training error
+pred1gbm <- predict(gbm1, newdata = train, n.trees=perf_gbm1, type="response")
+pred1gbm[1:10]
+```
+
+
+```{r}
+y1hat <- ifelse(pred1gbm < 0.5, 0, 1)
+y1hat[1:10]
+```
+
+
+
+```{r}
+sum(y1hat != y1)/length(y1)  ##Training error 
+```
+
+
+Testing Error
+```{r}
+## Testing Error
+y2hat <- ifelse(predict(gbm1, newdata = test[,-1], n.trees=perf_gbm1,type="response") < 0.5, 0, 1)
+c <- mean(y2hat != y2)
+c
+```
+
+
+##### Manually guess at some improvements ###$
+
+```{r}
+# reproducibility
+set.seed(123)
+
+gbm2 <- gbm(Churn ~ .,
+                 data = train,
+                 distribution = 'bernoulli', #for classifcation
+                   n.trees = 500,            #The parameter M
+                   shrinkage = 0.3,          #The value lambda, default = .01
+                   interaction.depth = 5,      #interactions between x's
+                   cv.folds = 10)                # K > 0 for cv
+ 
+## Find the estimated optimal number of iterations
+perf_gbm2 = gbm.perf(gbm2, method="cv") 
+perf_gbm2           
+```
+
+
+
+
+```{r}
+## Which variances are important? Boosting Round 2  #220
+summary(gbm2)
+```
+
+
+
+```{r}
+
+## Training error
+pred1gbm2 <- predict(gbm2, newdata = train, n.trees=perf_gbm2, type="response")
+pred1gbm2[1:10]
+
+y1hat2 <- ifelse(pred1gbm2 < 0.5, 0, 1)
+y1hat2[1:10]
+```
+
+
+
+```{r}
+sum(y1hat2 != y1)/length(y1)  ##Training error 
+```
+
+
+
+Testing Error
+```{r}
+## Testing Error
+y2hat2 <- ifelse(predict(gbm2, newdata = test[,-1], n.trees=perf_gbm2,type="response") < 0.5, 0, 1)
+d <- mean(y2hat2 != y2) 
+d
+```
+
+gbm9  Run w top 9 predictors
+
+Row # for order count 12,  prefed log in computer 15, 
+```{r}
+head(train,3)
+head(test,3)
+```
+
+Select top performing variables to use going forward, along w Churn 1,
+Tenure 2, CashbackAmount 15, NumberofAddress 9,
+```{r}
+#Churn 1, Tenure 2, CashbackAmount 15, NumberofAddress 9,
+#remove order count 13
+top.9.train <- train[,c(1,2,4,6:10,13,14)]
+top.9.test <- test[,c(1,2,4,6:10,13,14)]
+
+top.9.train
+```
+
+
+rf9  RF w top 9
+```{r}
+set.seed(123)
+rf9 <- randomForest(as.factor(Churn) ~., data = top.9.train, mtry = sqrt(9), importance = TRUE)
+
+#rf.pred.train = predict(rf, train, type='class')
+#table(rf.pred.train, y1)
+
+#RF: Test error prediction & confusion matrix
+#rf9.pred.test = predict(rf9, top.9.test, type='class')
+#table(rf9.pred.test, y2)
+
+y2hat.rf9.test = predict(rf9, top.9.test, type='class')
+a9 <- mean(y2hat.rf9.test != y2)
+a9
+```
+
+
+
+frb9 Top 9 w optimizerd rfb
+will need to slightly adjust optimization:
+sqrt of p; p is now 9
+```{r}
+set.seed(123)
+#no of rows train data = 2516; no of rows test data = 1258
+rfb9 <- randomForest(as.factor(Churn) ~., data=top.9.train, ntree= 500, 
+                   mtry = 3, nodesize = 1,  importance = TRUE)
+
+
+#rf.pred.train = predict(rf, train, type='class')
+#table(rf.pred.train, y1)
+
+#RF: Test error prediction & confusion matrix
+#rf9.pred.test = predict(rf9, top.9.test, type='class')
+#table(rf9.pred.test, y2)
+
+y2hat.rfb9.test = predict(rfb9, top.9.test, type='class')
+b9 <- mean(y2hat.rfb9.test != y2)
+b9
+```
+
+
+0.03736089
+```{r}
+# names of features
+features9 <- setdiff(names(top.9.train), as.factor("Churn"))
+
+set.seed(123)
+
+m29 <- tuneRF(
+  x          = top.9.train[features9],
+  y          = as.factor(top.9.train$Churn),
+  #y          = top.9.train$Churn,
+  ntreeTry   = 500,
+  mtryStart  = 3,
+  stepFactor = 1.5,
+  improve    = 0.01,
+  trace      = FALSE,
+  type       = 'class'            # to not show real-time progress 
+)
+```
+
+## Find the estimated optimal number of iterations
+perf_gbm2 = gbm.perf(gbm2, method="cv") 
+perf_gbm2   
+```{r}
+# reproducibility
+set.seed(123)
+
+gbm29 <- gbm(Churn ~ .,
+                 data = top.9.train,
+                 distribution = 'bernoulli', #for classifcation
+                   n.trees = 500,            #The parameter M
+                   shrinkage = 0.3,          #The value lambda, default = .01
+                   interaction.depth = 5,      #interactions between x's
+                   cv.folds = 10)                # K > 0 for cv
+ 
+## Find the estimated optimal number of iterations
+perf_gbm29 = gbm.perf(gbm29, method="cv") 
+perf_gbm29           
+```
+
+
+```{r}
+## Which variances are important? Boosting Round 2
+#summary(gbm29)
+```
+
+
+
+```{r}
+# Training error
+pred1gbm29 <- predict(gbm29, newdata = top.9.train, n.trees=perf_gbm29, type="response")
+pred1gbm29[1:10]
+
+y1hat29 <- ifelse(pred1gbm29 < 0.5, 0, 1)
+y1hat29[1:10]
+```
+
+
+
+```{r}
+sum(y1hat29 != y1)/length(y1)  ##Training error 
+```
+
+
+Boosting B w top 9  Testing Error
+```{r}
+## Testing Error
+y2hat29 <- ifelse(predict(gbm29, newdata = top.9.test[,-1], n.trees=perf_gbm29,type="response") < 0.5, 0, 1)
+d9 <- mean(y2hat2 != y2) 
+```
+
+
+
+Let's check Boosting A w top 9
+```{r}
+# reproducibility
+set.seed(123)
+
+gbm19 <- gbm(Churn ~ .,
+                 data = top.9.train,
+                 distribution = 'bernoulli', #for classifcation
+                   n.trees = 5000,            #The parameter M
+                   shrinkage = 0.01,          #The value lambda, default = .01
+                   interaction.depth = 3,      #interactions between x's
+                   cv.folds = 10)                # K > 0 for cv
+ 
+## Find the estimated optimal number of iterations
+perf_gbm19 = gbm.perf(gbm19, method="cv") 
+perf_gbm19           
+```
+
+
+```{r}
+# Training error
+pred1gbm19 <- predict(gbm19, newdata = top.9.train, n.trees=perf_gbm19, type="response")
+pred1gbm19[1:10]
+
+y1hat19 <- ifelse(pred1gbm19 < 0.5, 0, 1)
+y1hat19[1:10]
+```
+
+
+
+```{r}
+sum(y1hat19 != y1)/length(y1)  ##Training error 
+```
+
+
+Boosting A w top 9  Testing Error
+```{r}
+## Testing Error
+y2hat19 <- ifelse(predict(gbm19, newdata = top.9.test[,-1], n.trees=perf_gbm19,type="response") < 0.5, 0, 1)
+c9 <- mean(y2hat19 != y2) 
+c9
+
+```
+
+
+1 = Y = church: 35 columns total, so 2:35 are all predictor variables
+
+rfb9 Let's go back and run the top 9 predictors on the optimized rfb, as it has only been run on all the data
+```{r}
+set.seed(123)
+#no of rows train data = 2516; no of rows test data = 1258
+rfb9 <- randomForest(as.factor(Churn) ~., data=top.9.train, ntree= 500, 
+                   mtry = 4, nodesize = 1,  importance = TRUE)
+```
+
+
+
+RF: Training error prediction & confusion matrix
+```{r}
+rfb9.pred.train = predict(rfb9, top.9.train, type='class')
+table(rfb9.pred.train, y1)
+```
+
+
+RF: Test error prediction & confusion matrix
+```{r}
+rfb9.pred.test = predict(rfb9, top.9.test, type='class')
+table(rfb9.pred.test, y2)
+```
+
+RF: Test error rate
+```{r}
+#.038
+y2hat.rfb9.test = predict(rfb9, top.9.test, type='class')
+b9 <- mean(y2hat.rfb9.test != y2)
+b9
+```
+
+
+
+
+
+## C. LDA
+```{r}
+#B.Linear Discriminant Analysis : 0.1041667 
+#Test error rate LDA
+#library(MASS) 
+
+set.seed(123)
+modB <- lda(train[,2:35], train[,1])
+y2hatB <- predict(modB, test[,-1])$class
+e <- mean( y2hatB  != y2)
+e
+
+```
+
+
+```{r}
+#B.Linear Discriminant Analysis :w top 9  0.1041667 
+set.seed(123)
+modB9 <- lda(top.9.train[,2:10], top.9.train[,1])
+y2hatB9 <- predict(modB9, top.9.test[,-1])$class
+e9 <- mean( y2hatB9  != y2)
+e9
+
+```
+
+
+
+## D Naive Bayes
+```{r}
+## C. Naive Bayes (with full X). Testing error = 0.313151
+#entire data set
+#library(e1071) 
+set.seed(123)
+modC <- naiveBayes(as.factor(Churn) ~. , data = train)
+y2hatC <- predict(modC, newdata = test)
+f <- mean( y2hatC != y2) 
+f
+```
+
+NB w top 9
+```{r}
+## C. Naive Bayes (with full X). Testing error = 0.313151
+
+set.seed(123)
+modC9 <- naiveBayes(as.factor(Churn) ~. , data = top.9.train)
+y2hatC9 <- predict(modC9, newdata = top.9.test)
+f9 <- mean( y2hatC9 != y2) 
+f9
+```
+
+
+## E Classification tree 
+```{r}
+#D: a single Tree: 0.1015625
+#library(rpart)  #Classification tree, library(e1071) Naive Bayes,   library(MASS)  library(MASS) library(gbm) library(randomForest)
+
+set.seed(123)
+modE0 <- rpart(Churn ~ .,data=train, method="class", 
+                     parms=list(split="gini"))
+opt <- which.min(modE0$cptable[, "xerror"]); 
+cp1 <- modE0$cptable[opt, "CP"];
+modE <- prune(modE0,cp=cp1);
+y2hatE <-  predict(modE, test[,-1],type="class")
+g <- mean(y2hatE != y2)
+g
+```
+
+
+Classification tree top 9
+```{r}
+#D: a single Tree: 0.1015625
+
+set.seed(123)
+modE09 <- rpart(Churn ~ .,data=top.9.train, method="class", 
+                     parms=list(split="gini"))
+opt9 <- which.min(modE09$cptable[, "xerror"]); 
+cp19 <- modE09$cptable[opt9, "CP"];
+modE9 <- prune(modE09,cp=cp19);
+y2hatE9 <-  predict(modE9, top.9.test[,-1],type="class")
+g9 <- mean(y2hatE9 != y2)
+g9
+```
+
+
+## Summary Tables
+```{r}
+#Method <- c('RF1', 'RF2', 'Bst1', 'Bst2', 'LDA', 'NB', 'Tree')
+All_34 <- c(a, b, c, d, e, f, g)
+Top_9 <- c(a9, b9, c9, d9, e9, f9, g9)
+TE <- data.frame(All_34, Top_9)
+rownames(TE) <- c('RF1', 'RF2', 'Bst1', 'Bst2', 'LDA', 'NB', 'Tree')
+TE
+```
+
+Make a graph
+
+
+KNN.CV.Summary["K.Value" ] <- rownames(KNN.CV.Summary)
+KNN.Summary <- melt(KNN.CV.Summary)
+```{r}
+TE["Model" ] <- rownames(TE)
+TE.Summary <- melt(TE)
+```
+
+
+```{r}
+TE.Summary
+```
+
+
+
+```{r}
+ggplot(TE.Summary, aes(x = Model, y = value, group = variable, colour = variable)) +   
+            geom_line(size = 2)
+```
+
+
+
+
+
+
+Calculate the Delta in TE
+data <- data.frame(A = c(1,2,3,4), B = c(2,2,2,2))
+ data$C <- (data$A - data$B)
+```{r}
+
+```
+
+
+Difference or Delta between of all 34 predictors vs. the top 9;
+#auto6 <- auto4[c("mpg", "horsepower", "weight")]
+```{r}
+#library(dplyr)
+TE.d <- TE
+
+TE.d$Delta <- round((TE.d$All_34 - TE.d$Top_9),4)
+TE.d2 <- TE.d[c("All_34", "Top_9", "Delta")]
+#TE.d2 <- TE.d[c("All_34", "Top_9", "Delta")]
+TE.d3 <- round(TE.d2, 4)
+TE.d3
+```
+
+#Method <- c('RF1', 'RF2', 'Bst1', 'Bst2', 'LDA', 'NB', 'Tree')
+All_34 <- c(a, b, c, d, e, f, g)
+Top_9 <- c(a9, b9, c9, d9, e9, f9, g9)
+
+TE <- data.frame(All_34, Top_9)
+
+rownames(TE) <- c('RF1', 'RF2', 'Bst1', 'Bst2', 'LDA', 'NB', 'Tree')
+TE
+
+```{r}
+typeof(TE.d)
+```
+
+#### REFERENCE ######
+
+1. This is the Ecommerce Data set, available from
+ https://www.kaggle.com/datasets/ankitverma2010/ecommerce-customer-churn-analysis-and-prediction
+
+1. MICE: filling in missing values: do if time?
+https://towardsdatascience.com/smart-handling-of-missing-data-in-r-6425f8a559f2
+
+
+2. Geting various  model performance scores in carret, ie ROC https://topepo.github.io/caret/variable-importance.html
+
+3. https://stackoverflow.com/questions/48649443/how-to-one-hot-encode-several-categorical-variables-in-r
+
